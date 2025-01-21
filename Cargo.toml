@@ -4,4 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = "0.15.1"
+bevy = { version = "0.15.1", features = ["dynamic_linking"] }
+bevy_flycam = "*"
+
+
+
+
+[profile.dev]
+opt-level = 1
+debug = 1
+overflow-checks = false
+incremental = true
+
+[profile.release]
+opt-level = 3
+debug = 0
