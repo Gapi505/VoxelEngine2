@@ -1,4 +1,6 @@
 use std::ops::Add;
+use std::time::Instant;
+use bevy::asset::io::ErasedAssetWriter;
 use bevy::prelude::*;
 use bevy::render::primitives::Aabb;
 use bevy::tasks::{block_on, AsyncComputeTaskPool};
@@ -8,6 +10,12 @@ use bevy_flycam::prelude::*;
 
 use components::*;
 mod components;
+
+
+
+const RENDER_DISTANCE: i32 = 4;
+
+
 fn main() {
     let mut app = App::new();
     app.add_plugins((DefaultPlugins, Setup));
@@ -19,14 +27,14 @@ struct Setup;
 
 impl Plugin for Setup {
     fn build(&self, app: &mut App) {
-        app.add_plugins(PlayerPlugin)
+        app.add_plugins(NoCameraPlayerPlugin)
             .insert_resource(KeyBindings{
                 move_ascend: KeyCode::Space,
                 move_descend: KeyCode::ShiftLeft,
                 ..Default::default()
             })
             .insert_resource(MovementSettings{
-                speed: 70.,
+                speed: 120.,
                 ..Default::default()
             });
 
@@ -37,20 +45,32 @@ impl Plugin for Setup {
         app.add_systems(Update, (generate_chunks_async,poll_chunk_generations));
         app.add_systems(Update, (mesh_chunks_async,poll_chunk_meshing));
         // app.add_systems(Update, (update_neighbour_data));
+        app.add_systems(Update, (spawn_chunks_around_player, destroy_chunks_away_from_player));
     }
 }
 
+
+#[derive(Component)]
+struct Player;
 
 fn prepare_scene(
     mut commands: Commands,
 ){
     commands.spawn((DirectionalLight{
-        illuminance: light_consts::lux::DIRECT_SUNLIGHT,
+        illuminance: light_consts::lux::AMBIENT_DAYLIGHT,
         shadows_enabled: true,
         ..Default::default()
     },
-        Transform::from_rotation(Quat::from_rotation_x(-70f32.to_radians()).add(Quat::from_rotation_z(30f32.to_radians()))),
+        Transform::from_rotation(Quat::from_rotation_x(-45f32.to_radians()).add(Quat::from_rotation_z(30f32.to_radians()))),
     ));
+
+    commands.spawn((
+        FlyCam,
+        Camera3d{
+            ..default()
+        },
+        Player
+        ));
 }
 
 
@@ -75,6 +95,55 @@ fn spawn_test_chunks(
     }
 }
 
+fn spawn_chunks_around_player(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut chunks: ResMut<Chunks>,
+    player: Query<&Transform, With<Player>>,
+){
+    let trans = player.get_single().unwrap();
+    let render_distance = RENDER_DISTANCE;
+    for x in -render_distance..render_distance {
+        for y in -render_distance..render_distance {
+            for z in -render_distance..render_distance {
+                let chunk_pos_offset = IVec3::new(x, y, z);
+                let player_chunkpos = trans.translation.as_ivec3() / CHUNK_SIZE as i32;
+                let chunkpos = player_chunkpos + chunk_pos_offset;
+                if let None = chunks.get_raw(chunkpos) {
+                    spawn_chunk(
+                        &mut commands,
+                        &mut chunks,
+                        &mut materials,
+                        &mut meshes,
+                        ChunkPosition::from_ivec(chunkpos)
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn destroy_chunks_away_from_player(
+    mut commands: Commands,
+    mut chunks: ResMut<Chunks>,
+    query: Query<(Entity, &Chunk), Without<ProcessingGeneration>>,
+    player: Query<&Transform, With<Player>>
+){
+
+    let trans = player.get_single().unwrap();
+    for (entity, chunk) in query.iter() {
+        let chunkpos = chunk.chunk_position.as_ivec3();
+        let player_chunkpos = trans.translation.as_ivec3() / CHUNK_SIZE as i32;
+        let dst = player_chunkpos - chunkpos;
+        if dst.x.abs() > RENDER_DISTANCE || dst.y.abs() > RENDER_DISTANCE || dst.z.abs() > RENDER_DISTANCE {
+            commands.entity(entity).despawn();
+            chunks.remove(ChunkPosition::from_ivec(chunkpos));
+        }
+    }
+}
+
+
 fn spawn_chunk(
     mut commands: &mut Commands,
     mut chunks: &mut ResMut<Chunks>,
@@ -97,7 +166,7 @@ fn spawn_chunk(
             }
         )),
         Aabb::from_min_max(Vec3::ZERO, Vec3::splat(CHUNK_SIZE as f32)),
-        NeedsToUpdateNeighbours,
+        //NeedsToUpdateNeighbours,
     )).id();
 
     chunks.insert(chunk_position, chunk_ent);
@@ -114,10 +183,12 @@ fn generate_chunks_async(
     for (entity, chunk) in chunk_ents.iter(){
         let chunk_clone = chunk.clone(); // Clone the chunk data
         let task = thread_pool.spawn(async move {
+            let start_time = Instant::now(); // Record the start time
             let data = chunk_clone.generate();
+            let duration = start_time.elapsed(); // Measure elapsed time
+            println!("Generation completed in: {:?}", duration);
             data
         });
-
         commands.entity(entity).insert(ProcessingGeneration(task));
         commands.entity(entity).remove::<NeedsGeneration>();
     }
@@ -147,6 +218,9 @@ fn mesh_chunks_async(
         let chunk_clone = chunk.clone(); // Clone the chunk data
         let task = thread_pool.spawn(async move {
             let mesh = chunk_clone.cull_mesher();
+            let start_time = Instant::now(); // Record the start time
+            let duration = start_time.elapsed(); // Measure elapsed time
+            println!("Meshing completed in: {:?}", duration);
             mesh
         });
 
@@ -165,54 +239,9 @@ fn poll_chunk_meshing(
             let mesh_handle = meshes.add(mesh);
             commands.entity(entity).insert(Mesh3d(mesh_handle));
             commands.entity(entity).remove::<ProcessingMeshing>();
-            println!("meshed")
+            //println!("meshed")
         }
     }
 }
 
 
-fn update_neighbour_data(
-    mut chunk_ents: Query<(&mut Chunk, Entity), With<NeedsToUpdateNeighbours>>,
-    chunks: Res<Chunks>,
-    chunks_query: Query<&Chunk>,
-    mut commands: Commands,
-) {
-    for (mut chunk, entity) in chunk_ents.iter_mut() {
-        for direction in Direction::iter() {
-            // Get the neighbor chunk's position
-            let offset = match direction {
-                Direction::Left => IVec3::new(-1, 0, 0),
-                Direction::Right => IVec3::new(1, 0, 0),
-                Direction::Front => IVec3::new(0, 0, 1),
-                Direction::Back => IVec3::new(0, 0, -1),
-                Direction::Top => IVec3::new(0, 1, 0),
-                Direction::Bottom => IVec3::new(0, -1, 0),
-            };
-            let neighbor_pos = chunk.chunk_position.as_ivec3() + offset;
-
-            // Try to get the neighbor entity
-            if let Some(neighbor_entity) = chunks.get_raw(neighbor_pos) {
-                if let Ok(neighbor_chunk) = chunks_query.get(neighbor_entity) {
-                    // Update the boundary data for this direction
-                    for y in 0..CHUNK_SIZE {
-                        for x in 0..CHUNK_SIZE {
-                            let value = match direction {
-                                Direction::Left => neighbor_chunk.get_raw(IVec3::new(0, y as i32, x as i32)),
-                                Direction::Right => neighbor_chunk.get_raw(IVec3::new(CHUNK_SIZE as i32 - 1, y as i32, x as i32)),
-                                Direction::Front => neighbor_chunk.get_raw(IVec3::new(x as i32, y as i32, CHUNK_SIZE as i32 - 1)),
-                                Direction::Back => neighbor_chunk.get_raw(IVec3::new(x as i32, y as i32, 0)),
-                                Direction::Top => neighbor_chunk.get_raw(IVec3::new(x as i32, CHUNK_SIZE as i32 - 1, y as i32)),
-                                Direction::Bottom => neighbor_chunk.get_raw(IVec3::new(x as i32, 0, y as i32)),
-                            };
-                            chunk.neighbour_block_data.set(direction, x as i32, y as i32, value);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Remove the `NeedsToUpdateNeighbours` component
-        commands.entity(entity).remove::<NeedsToUpdateNeighbours>();
-        commands.entity(entity).insert(NeedsGeneration);
-    }
-}

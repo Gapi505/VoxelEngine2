@@ -1,12 +1,12 @@
 use bevy::asset::RenderAssetUsages;
-use bevy::math::ivec3;
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::tasks::Task;
 use bevy::utils::HashMap;
 use noise::{NoiseFn, Perlin};
+use fastnoise_lite::{NoiseType, FastNoiseLite};
 
-pub const CHUNK_SIZE: usize = 32;
+pub const CHUNK_SIZE: usize = 16;
 
 #[derive(Resource)]
 pub struct Chunks {
@@ -27,6 +27,9 @@ impl Chunks {
 
     pub fn insert(&mut self, pos: ChunkPosition, entity: Entity) {
         self.chunks.insert(pos.as_ivec3(), entity);
+    }
+    pub fn remove(&mut self, pos: ChunkPosition) {
+        self.chunks.remove(&pos.as_ivec3());
     }
 }
 
@@ -110,29 +113,31 @@ impl Chunk {
 
     pub fn generate(&self) -> [u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE] {
         let mut data = self.data;
+        let mut noisegen = FastNoiseLite::new();
+        noisegen.set_noise_type(Some(NoiseType::Perlin));
         for i in 0..data.len() {
             let pos = self.index_to_pos(i);
             let pos2d = Vec2::new(pos.x as f32, pos.z as f32);
 
+            let mut noise = self.noise_2d(&mut noisegen, 1., pos2d, 9182312)*100.-30.;
+            noise += self.noise_2d(&mut noisegen, 0.2,pos2d, 2131231)*10.-5.;
+            noise += self.noise_2d(&mut noisegen,0.1 ,pos2d, 2917837893)*5.;
 
-            let mut noise = self.noise_2d(10., pos2d, 9182312)*10.+10.;
-            // noise += self.noise_2d(80. ,pos2d, 2131231)*10.-00.;
-            // noise += self.noise_2d(20. ,pos2d, 2917837893)*5.;
-
-            if ((pos.y + self.chunk_position.as_ivec3().y * CHUNK_SIZE as i32) as f64)< noise{
+            if ((pos.y + self.chunk_position.as_ivec3().y * CHUNK_SIZE as i32) as f32)< noise{
                 //println!("here");
                 data[i] = 1;
             }
         }
+
         data
     }
-    fn noise_2d(&self, scale: f64, inchunk_position: Vec2, seed_offset: u64) -> f64{
-        let perlin = Perlin::new((self.seed + seed_offset) as u32);
+    fn noise_2d(&self, noise: &mut FastNoiseLite,  scale: f64, inchunk_position: Vec2, seed_offset: u64) -> f32{
+        noise.set_seed(Some((self.seed + seed_offset) as i32));
         let global_x = (self.chunk_position.as_ivec3().x * CHUNK_SIZE as i32) as f32 + inchunk_position.x;
         let scaled_x = global_x as f64 / scale;
         let global_z = (self.chunk_position.as_ivec3().z * CHUNK_SIZE as i32) as f32 + inchunk_position.y;
         let scaled_z = global_z as f64 / scale;
-        (perlin.get([scaled_x, scaled_z])+1.)*0.5
+        (noise.get_noise_2d(scaled_x as f32, scaled_z as f32)+1.)*0.5
     }
 
 
@@ -238,12 +243,12 @@ impl Chunk {
                     [x + 1., y + 1., z]];
 
                 let mut neighbors = [
-                    (ivec3(0, 1, 0), &mut top_face, &mut top_norm, true),
-                    (ivec3(0, -1, 0), &mut bottom_face, &mut bottom_norm, false),
-                    (ivec3(1, 0, 0), &mut left_face, &mut left_norm, true),
-                    (ivec3(-1, 0, 0), &mut right_face, &mut right_norm, false),
-                    (ivec3(0, 0, 1), &mut front_face, &mut front_norm, true),
-                    (ivec3(0, 0, -1), &mut back_face, &mut back_norm, false),
+                    (Direction::Top.to_ivec(), &mut top_face, &mut top_norm, true),
+                    (Direction::Bottom.to_ivec(), &mut bottom_face, &mut bottom_norm, false),
+                    (Direction::Left.to_ivec(), &mut left_face, &mut left_norm, true),
+                    (Direction::Right.to_ivec(), &mut right_face, &mut right_norm, false),
+                    (Direction::Front.to_ivec(), &mut front_face, &mut front_norm, true),
+                    (Direction::Back.to_ivec(), &mut back_face, &mut back_norm, false),
                 ];
 
                 for (offset, face, norm, flipped) in neighbors.iter_mut() {
@@ -273,7 +278,7 @@ pub struct NeighbourBlockData {
 }
 impl NeighbourBlockData {
     fn new() -> Self {
-        let data = [[0; CHUNK_SIZE * CHUNK_SIZE]; 6];
+        let data = [[1u8; CHUNK_SIZE * CHUNK_SIZE]; 6];
         NeighbourBlockData { data }
     }
     pub const fn get_index(direction: Direction) -> usize {
@@ -349,6 +354,17 @@ impl Direction {
             Direction::Top
         }
     }
+
+    pub const fn to_ivec(&self) -> IVec3 {
+        match self {
+            Direction::Left => IVec3::new(-1, 0, 0),
+            Direction::Right => IVec3::new(1, 0, 0),
+            Direction::Front => IVec3::new(0, 0, 1),
+            Direction::Back => IVec3::new(0, 0, -1),
+            Direction::Top => IVec3::new(0, 1, 0),
+            Direction::Bottom => IVec3::new(0, -1, 0),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -359,6 +375,11 @@ impl ChunkPosition {
     pub fn from_world_pos(world_position: IVec3) -> Self {
         ChunkPosition {
             position: world_position / CHUNK_SIZE as i32,
+        }
+    }
+    pub fn from_ivec(ivec: IVec3) -> Self {
+        Self{
+            position: ivec,
         }
     }
     pub fn new(x: i32,y:i32,z:i32) -> Self {
