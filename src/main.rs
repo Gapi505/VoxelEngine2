@@ -256,7 +256,13 @@ fn update_nearby_chunks(
     mut connamds: Commands
 ) {
     for cur_chunk in chunks_query.iter_mut(){
-        let offsets = Direction.iter();
+        let offsets = Direction::iter();
+        for offset in offsets{
+            let pos = cur_chunk.chunk_position.as_ivec3() - offset.to_ivec();
+            let chunk = chunks.get_raw(pos);
+
+        }
+
     } 
 }
 
