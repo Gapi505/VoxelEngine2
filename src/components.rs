@@ -6,7 +6,7 @@ use bevy::utils::HashMap;
 use noise::{NoiseFn, Perlin};
 use fastnoise_lite::{NoiseType, FastNoiseLite};
 
-pub const CHUNK_SIZE: usize = 16;
+pub const CHUNK_SIZE: usize = 32;
 
 #[derive(Resource)]
 pub struct Chunks {
@@ -115,17 +115,24 @@ impl Chunk {
         let mut data = self.data;
         let mut noisegen = FastNoiseLite::new();
         noisegen.set_noise_type(Some(NoiseType::Perlin));
-        for i in 0..data.len() {
-            let pos = self.index_to_pos(i);
-            let pos2d = Vec2::new(pos.x as f32, pos.z as f32);
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let pos2d = Vec2::new(x as f32, z as f32);
+                let mut noise = self.noise_2d(&mut noisegen, 2., pos2d, 9182312)*300.-30.;
+                noise += self.noise_2d(&mut noisegen, 1., pos2d, 91872378912)*30.-30.;
+                noise += self.noise_2d(&mut noisegen, 0.2,pos2d, 2131231)*10.-5.;
+                noise *= self.noise_2d(&mut noisegen, 8., pos2d, 8769132)*1.;
+                noise += self.noise_2d(&mut noisegen, 3., pos2d, 1047638)*7.;
+                noise += self.noise_2d(&mut noisegen,0.1 ,pos2d, 2917837893)*5.;
 
-            let mut noise = self.noise_2d(&mut noisegen, 1., pos2d, 9182312)*100.-30.;
-            noise += self.noise_2d(&mut noisegen, 0.2,pos2d, 2131231)*10.-5.;
-            noise += self.noise_2d(&mut noisegen,0.1 ,pos2d, 2917837893)*5.;
-
-            if ((pos.y + self.chunk_position.as_ivec3().y * CHUNK_SIZE as i32) as f32)< noise{
-                //println!("here");
-                data[i] = 1;
+                for y in 0..CHUNK_SIZE {
+                    let pos = IVec3::new(x as i32,y as i32,z as i32);
+                    if ((pos.y + self.chunk_position.as_ivec3().y * CHUNK_SIZE as i32) as f32)< noise{
+                        //println!("here");
+                        let i = self.pos_to_index(pos);
+                        data[i] = 1;
+                    }
+                }
             }
         }
 
@@ -268,6 +275,10 @@ impl Chunk {
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
         mesh.insert_indices(Indices::U32(indices));
         mesh
+    }
+
+    pub fn is_empty(&self) -> bool{
+        self.data.iter().all(|b| b == &0) || self.data.iter().all(|b| b >= &1)
     }
 
 }

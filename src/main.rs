@@ -13,7 +13,7 @@ mod components;
 
 
 
-const RENDER_DISTANCE: i32 = 4;
+const RENDER_DISTANCE: i32 = 8;
 
 
 fn main() {
@@ -127,7 +127,7 @@ fn spawn_chunks_around_player(
 fn destroy_chunks_away_from_player(
     mut commands: Commands,
     mut chunks: ResMut<Chunks>,
-    query: Query<(Entity, &Chunk), Without<ProcessingGeneration>>,
+    query: Query<(Entity, &Chunk), Without<ProcessingLock>>,
     player: Query<&Transform, With<Player>>
 ){
 
@@ -189,7 +189,7 @@ fn generate_chunks_async(
             println!("Generation completed in: {:?}", duration);
             data
         });
-        commands.entity(entity).insert(ProcessingGeneration(task));
+        commands.entity(entity).insert((ProcessingGeneration(task), ProcessingLock));
         commands.entity(entity).remove::<NeedsGeneration>();
     }
 }
@@ -203,7 +203,12 @@ fn poll_chunk_generations(
         if let Some(data) = block_on(future::poll_once(&mut gen_task.0)){
             chunk.data = data;
             commands.entity(entity).remove::<ProcessingGeneration>();
-            commands.entity(entity).insert(NeedsMeshing);
+            if !chunk.is_empty(){
+                commands.entity(entity).insert(NeedsMeshing);
+            }
+            else {
+                commands.entity(entity).despawn();
+            }
         }
     }
 }
@@ -217,14 +222,14 @@ fn mesh_chunks_async(
     for (entity, chunk) in chunk_ents.iter(){
         let chunk_clone = chunk.clone(); // Clone the chunk data
         let task = thread_pool.spawn(async move {
-            let mesh = chunk_clone.cull_mesher();
             let start_time = Instant::now(); // Record the start time
+            let mesh = chunk_clone.cull_mesher();
             let duration = start_time.elapsed(); // Measure elapsed time
             println!("Meshing completed in: {:?}", duration);
             mesh
         });
 
-        commands.entity(entity).insert(ProcessingMeshing(task));
+        commands.entity(entity).insert((ProcessingMeshing(task)));
         commands.entity(entity).remove::<NeedsMeshing>();
     }
 }
@@ -239,9 +244,26 @@ fn poll_chunk_meshing(
             let mesh_handle = meshes.add(mesh);
             commands.entity(entity).insert(Mesh3d(mesh_handle));
             commands.entity(entity).remove::<ProcessingMeshing>();
+            commands.entity(entity).remove::<ProcessingLock>();
             //println!("meshed")
         }
     }
 }
 
+fn update_nearby_chunks(
+    mut chunks_query: Query<&Chunk, With<NeedsToUpdateNeighbours>>,
+    chunks: Res<Chunks>,
+    mut connamds: Commands
+) {
+    for cur_chunk in chunks_query.iter_mut(){
+        let offsets = Direction.iter();
+    } 
+}
+
+#[derive(Component)]
+struct NeedsToUpdateNeighbours;
+
+
+#[derive(Component)]
+struct ProcessingLock;
 
