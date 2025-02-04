@@ -7,13 +7,14 @@ use bevy::tasks::{block_on, AsyncComputeTaskPool};
 use bevy::tasks::futures_lite::{future, StreamExt};
 use bevy::utils::futures;
 use bevy_flycam::prelude::*;
+use bevy::pbr::{CascadeShadowConfigBuilder, NotShadowCaster};
 
 use components::*;
 mod components;
 
 
 
-const RENDER_DISTANCE: i32 = 8;
+const RENDER_DISTANCE: i32 = 12;
 
 
 fn main() {
@@ -45,7 +46,7 @@ impl Plugin for Setup {
         app.add_systems(Update, (generate_chunks_async,poll_chunk_generations));
         app.add_systems(Update, (mesh_chunks_async,poll_chunk_meshing));
         // app.add_systems(Update, (update_neighbour_data));
-        app.add_systems(Update, (spawn_chunks_around_player, destroy_chunks_away_from_player));
+        app.add_systems(Update, (spawn_chunks_around_player, destroy_chunks_away_from_player, move_skybox));
     }
 }
 
@@ -55,24 +56,72 @@ struct Player;
 
 fn prepare_scene(
     mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>
 ){
-    commands.spawn((DirectionalLight{
-        illuminance: light_consts::lux::AMBIENT_DAYLIGHT,
-        shadows_enabled: true,
-        ..Default::default()
-    },
-        Transform::from_rotation(Quat::from_rotation_x(-45f32.to_radians()).add(Quat::from_rotation_z(30f32.to_radians()))),
+    let far_distance = (RENDER_DISTANCE*CHUNK_SIZE as i32) as f32;
+
+    let cascade_config = CascadeShadowConfigBuilder{
+            first_cascade_far_bound: 90.,
+            maximum_distance: far_distance,
+            ..Default::default()
+        }.build();
+    commands.spawn((
+        DirectionalLight {
+            illuminance: light_consts::lux::AMBIENT_DAYLIGHT,
+            shadows_enabled: true,
+            ..Default::default()
+        },
+        Transform::from_rotation(
+            Quat::from_rotation_x(-45f32.to_radians()) // Lower sun angle
+                .mul_quat(Quat::from_rotation_y(30f32.to_radians())), // Slight tilt for natural shadow spread
+        ),
+        cascade_config
     ));
 
+    commands.insert_resource(AmbientLight {
+        brightness: 0.05, // Adjust this value (0.0 = no ambient, 1.0 = full bright)
+        color: Color::srgb(0.8, 0.9, 1.0), // Slight blue tint to mimic sky reflection
+    });
     commands.spawn((
         FlyCam,
-        Camera3d{
-            ..default()
+        Camera3d::default(),
+        DistanceFog{
+            color: Color::srgb(0.35, 0.48, 0.66),
+            directional_light_color: Color::srgba(1., 0.95, 0.85, 0.5),
+            directional_light_exponent: 30.,
+            falloff: FogFalloff::from_visibility_colors(
+                far_distance,
+                Color::srgb(0.35,0.5,0.66),
+                Color::srgb(0.8,0.844,1.)
+            )
         },
         Player
         ));
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(1.,1.,1.))),
+        MeshMaterial3d(materials.add(StandardMaterial{
+            base_color: Color::srgb(0.6,0.6,0.6),
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        })),
+        Transform::from_scale(Vec3::splat(far_distance*2.)),
+        NotShadowCaster,
+        SkyboxCube
+    ));
 }
 
+#[derive(Component)]
+struct SkyboxCube;
+fn move_skybox(
+    mut skybox: Query<&mut Transform, With<SkyboxCube>>,
+    player: Query<&mut Transform, (With<Player>, Without<SkyboxCube>)>
+){
+    let mut transform = skybox.get_single_mut().unwrap();
+    let player = player.get_single().unwrap();
+    transform.translation = player.translation
+}
 
 fn spawn_test_chunks(
     mut commands: Commands,
@@ -166,6 +215,7 @@ fn spawn_chunk(
             }
         )),
         Aabb::from_min_max(Vec3::ZERO, Vec3::splat(CHUNK_SIZE as f32)),
+        ProcessingLock,
         //NeedsToUpdateNeighbours,
     )).id();
 
@@ -200,10 +250,11 @@ fn poll_chunk_generations(
     mut chunk_ents: Query<(Entity, &mut Chunk, &mut ProcessingGeneration)>
 ){
     for (entity, mut chunk, mut gen_task) in chunk_ents.iter_mut(){
-        if let Some(data) = block_on(future::poll_once(&mut gen_task.0)){
-            chunk.data = data;
+        if let Some((data, neighbour_data, is_empty)) = block_on(future::poll_once(&mut gen_task.0)){
             commands.entity(entity).remove::<ProcessingGeneration>();
-            if !chunk.is_empty(){
+            if !is_empty{
+                chunk.data = data;
+                chunk.neighbour_block_data = neighbour_data;
                 commands.entity(entity).insert(NeedsMeshing);
             }
             else {

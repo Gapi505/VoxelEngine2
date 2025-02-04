@@ -51,7 +51,7 @@ impl Chunk {
             seed: 6782137862
         }
     }
-    const fn pos_to_index(&self, pos: IVec3) -> usize {
+    const fn pos_to_index(pos: IVec3) -> usize {
         pos.z as usize * CHUNK_SIZE * CHUNK_SIZE + pos.y as usize * CHUNK_SIZE + pos.x as usize
     }
 
@@ -63,7 +63,7 @@ impl Chunk {
     }
 
     pub fn get_raw(&self, pos: IVec3) -> u8 {
-        self.data[self.pos_to_index(pos)]
+        self.data[Self::pos_to_index(pos)]
     }
 
     fn get_neighboured(&self, pos: IVec3) -> u8 {
@@ -111,12 +111,16 @@ impl Chunk {
 
 
 
-    pub fn generate(&self) -> [u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE] {
+    pub fn generate(&self) -> ([u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE],NeighbourBlockData, bool) {
         let mut data = self.data;
+        let mut neighbour_data = NeighbourBlockData::new();
         let mut noisegen = FastNoiseLite::new();
         noisegen.set_noise_type(Some(NoiseType::Perlin));
-        for x in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
+        let mut block_counter = 0;
+
+
+        for x in -1..(CHUNK_SIZE+1) as i32{
+            for z in -1..(CHUNK_SIZE+1) as i32{
                 let pos2d = Vec2::new(x as f32, z as f32);
                 let mut noise = self.noise_2d(&mut noisegen, 2., pos2d, 9182312)*300.-30.;
                 noise += self.noise_2d(&mut noisegen, 1., pos2d, 91872378912)*30.-30.;
@@ -124,19 +128,31 @@ impl Chunk {
                 noise *= self.noise_2d(&mut noisegen, 8., pos2d, 8769132)*1.;
                 noise += self.noise_2d(&mut noisegen, 3., pos2d, 1047638)*7.;
                 noise += self.noise_2d(&mut noisegen,0.1 ,pos2d, 2917837893)*5.;
+                
 
-                for y in 0..CHUNK_SIZE {
+                for y in -1..(CHUNK_SIZE+1) as i32 {
                     let pos = IVec3::new(x as i32,y as i32,z as i32);
                     if ((pos.y + self.chunk_position.as_ivec3().y * CHUNK_SIZE as i32) as f32)< noise{
                         //println!("here");
-                        let i = self.pos_to_index(pos);
+                        block_counter += 1;
+                        if  x<0 || x>= CHUNK_SIZE as i32||
+                            z<0 || z>= CHUNK_SIZE as i32||
+                            y<0 || y>= CHUNK_SIZE as i32 {
+                            let dir = Direction::from_offset(pos);
+                            let wrapped = Self::wrap_to_boundary_2d(pos, &dir);
+                            neighbour_data.set(dir, wrapped.x, wrapped.y, 1);
+                            continue;
+                        }
+                        
+                        let i = Self::pos_to_index(pos);
                         data[i] = 1;
                     }
                 }
             }
         }
-
-        data
+            
+        let is_empty = if block_counter == 0 || block_counter == (CHUNK_SIZE+2).pow(3){true} else {false};
+        (data, neighbour_data, is_empty)
     }
     fn noise_2d(&self, noise: &mut FastNoiseLite,  scale: f64, inchunk_position: Vec2, seed_offset: u64) -> f32{
         noise.set_seed(Some((self.seed + seed_offset) as i32));
@@ -213,63 +229,67 @@ impl Chunk {
         let mut ind = 0;
         let mut i = 0;
 
-        for block in chunk_data{
-            let ipos = self.index_to_pos(i);
-            let (x, y, z) = (ipos.x as f32, ipos.y as f32, ipos.z as f32);
-
-            if block != 0 {
-                let mut top_face = vec![
-                    [x, y + 1., z],
-                    [x + 1., y + 1., z],
-                    [x, y + 1., z + 1.],
-                    [x + 1., y + 1., z + 1.]];
-                let mut bottom_face = vec![
-                    [x, y, z],
-                    [x + 1., y, z],
-                    [x, y, z + 1.],
-                    [x + 1., y, z + 1.]];
-                let mut left_face = vec![
-                    [x, y, z],
-                    [x, y + 1., z],
-                    [x, y, z + 1.],
-                    [x, y + 1., z + 1.]];
-                let mut right_face = vec![
-                    [x + 1., y, z],
-                    [x + 1., y + 1., z],
-                    [x + 1., y, z + 1.],
-                    [x + 1., y + 1., z + 1.]];
-                let mut front_face = vec![
-                    [x, y, z + 1.],
-                    [x, y + 1., z + 1.],
-                    [x + 1., y, z + 1.],
-                    [x + 1., y + 1., z + 1.]];
-                let mut back_face = vec![
-                    [x, y, z],
-                    [x, y + 1., z],
-                    [x + 1., y, z],
-                    [x + 1., y + 1., z]];
-
-                let mut neighbors = [
-                    (Direction::Top.to_ivec(), &mut top_face, &mut top_norm, true),
-                    (Direction::Bottom.to_ivec(), &mut bottom_face, &mut bottom_norm, false),
-                    (Direction::Left.to_ivec(), &mut left_face, &mut left_norm, true),
-                    (Direction::Right.to_ivec(), &mut right_face, &mut right_norm, false),
-                    (Direction::Front.to_ivec(), &mut front_face, &mut front_norm, true),
-                    (Direction::Back.to_ivec(), &mut back_face, &mut back_norm, false),
-                ];
-
-                for (offset, face, norm, flipped) in neighbors.iter_mut() {
-                    if self.get_neighboured(ipos + *offset) == 0 {
-                        ind_positions.append(face);
-                        normals.append(&mut norm.clone());
-                        indices.append(&mut ind_vec!(ind, *flipped));
-                        ind += 4;
+        for x in 0..(CHUNK_SIZE) as i32{
+            for z in 0..(CHUNK_SIZE) as i32{
+                for y in 0..(CHUNK_SIZE) as i32{
+                    let ipos = IVec3::new(x,y,z);
+                    let i = Self::pos_to_index(ipos);
+                    let (x, y, z) = (ipos.x as f32, ipos.y as f32, ipos.z as f32);
+                    let block = chunk_data[i];
+                    if block != 0 {
+                        let mut top_face = vec![
+                            [x, y + 1., z],
+                            [x + 1., y + 1., z],
+                            [x, y + 1., z + 1.],
+                            [x + 1., y + 1., z + 1.]];
+                        let mut bottom_face = vec![
+                            [x, y, z],
+                            [x + 1., y, z],
+                            [x, y, z + 1.],
+                            [x + 1., y, z + 1.]];
+                        let mut left_face = vec![
+                            [x, y, z],
+                            [x, y + 1., z],
+                            [x, y, z + 1.],
+                            [x, y + 1., z + 1.]];
+                        let mut right_face = vec![
+                            [x + 1., y, z],
+                            [x + 1., y + 1., z],
+                            [x + 1., y, z + 1.],
+                            [x + 1., y + 1., z + 1.]];
+                        let mut front_face = vec![
+                            [x, y, z + 1.],
+                            [x, y + 1., z + 1.],
+                            [x + 1., y, z + 1.],
+                            [x + 1., y + 1., z + 1.]];
+                        let mut back_face = vec![
+                            [x, y, z],
+                            [x, y + 1., z],
+                            [x + 1., y, z],
+                            [x + 1., y + 1., z]];
+        
+                        let mut neighbors = [
+                            (Direction::Top.to_ivec(), &mut top_face, &mut top_norm, true),
+                            (Direction::Bottom.to_ivec(), &mut bottom_face, &mut bottom_norm, false),
+                            (Direction::Left.to_ivec(), &mut left_face, &mut left_norm, true),
+                            (Direction::Right.to_ivec(), &mut right_face, &mut right_norm, false),
+                            (Direction::Front.to_ivec(), &mut front_face, &mut front_norm, true),
+                            (Direction::Back.to_ivec(), &mut back_face, &mut back_norm, false),
+                        ];
+        
+                        for (offset, face, norm, flipped) in neighbors.iter_mut() {
+                            if self.get_neighboured(ipos + *offset) == 0 {
+                                ind_positions.append(face);
+                                normals.append(&mut norm.clone());
+                                indices.append(&mut ind_vec!(ind, *flipped));
+                                ind += 4;
+                            }
+                        }
+        
                     }
+
                 }
-
             }
-
-            i += 1
         }
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, ind_positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
@@ -289,7 +309,7 @@ pub struct NeighbourBlockData {
 }
 impl NeighbourBlockData {
     fn new() -> Self {
-        let data = [[1u8; CHUNK_SIZE * CHUNK_SIZE]; 6];
+        let data = [[0u8; CHUNK_SIZE * CHUNK_SIZE]; 6];
         NeighbourBlockData { data }
     }
     pub const fn get_index(direction: Direction) -> usize {
@@ -405,7 +425,7 @@ impl ChunkPosition {
 #[derive(Component)]
 pub struct NeedsGeneration;
 #[derive(Component)]
-pub struct ProcessingGeneration(pub Task<[u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>);
+pub struct ProcessingGeneration(pub Task<([u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE], NeighbourBlockData, bool)>);
 
 #[derive(Component)]
 pub struct NeedsMeshing;
