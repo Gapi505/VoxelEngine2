@@ -36,18 +36,16 @@ impl Chunks {
 #[derive(Component, Clone)]
 pub struct Chunk {
     pub chunk_position: ChunkPosition,
-    pub data: [u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE],
-    pub neighbour_block_data: NeighbourBlockData,
+    pub data: Option<[u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]>,
+    pub neighbour_block_data: Option<NeighbourBlockData>,
     pub seed: u64
 }
 impl Chunk {
     pub fn new(chunk_position: &ChunkPosition) -> Self {
-        let data = [0; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE];
-        let neighbour_block_data = NeighbourBlockData::new();
         Self {
             chunk_position: chunk_position.clone(),
-            data,
-            neighbour_block_data,
+            data: None,
+            neighbour_block_data: None,
             seed: 6782137862
         }
     }
@@ -62,26 +60,26 @@ impl Chunk {
         IVec3::new(x as i32, y as i32, z as i32)
     }
 
-    pub fn get_raw(&self, pos: IVec3) -> u8 {
-        self.data[Self::pos_to_index(pos)]
+    pub fn get_raw(data: &[u8; CHUNK_SIZE.pow(3)], pos: IVec3) -> u8 {
+        data[Self::pos_to_index(pos)]
     }
 
-    fn get_neighboured(&self, pos: IVec3) -> u8 {
+    fn get_neighboured(data: &[u8; CHUNK_SIZE.pow(3)], neighbours: &NeighbourBlockData,pos: IVec3) -> u8 {
         // Check if the position is within the chunk bounds
         if (0..CHUNK_SIZE as i32).contains(&pos.x)
             && (0..CHUNK_SIZE as i32).contains(&pos.y)
             && (0..CHUNK_SIZE as i32).contains(&pos.z)
         {
             // Position is within the chunk, return raw block data
-            self.get_raw(pos)
+            Self::get_raw(&data, pos)
+
         } else {
             // Determine which neighbor's boundary data to fetch
             let direction = Direction::from_offset(pos);
             let local_pos = Self::wrap_to_boundary_2d(pos, &direction);
 
             // Get data from the neighbor's boundary
-            self.neighbour_block_data
-                .get(direction, local_pos.x, local_pos.y)
+            neighbours.get(direction, local_pos.x, local_pos.y)
         }
     }
 
@@ -112,40 +110,78 @@ impl Chunk {
 
 
     pub fn generate(&self) -> ([u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE],NeighbourBlockData, bool) {
-        let mut data = self.data;
+        let mut data = [0; CHUNK_SIZE.pow(3)];
         let mut neighbour_data = NeighbourBlockData::new();
         let mut noisegen = FastNoiseLite::new();
         noisegen.set_noise_type(Some(NoiseType::Perlin));
+
+        let mut celular_noise = FastNoiseLite::new();
+        celular_noise.set_noise_type(Some(NoiseType::Cellular));
         let mut block_counter = 0;
 
 
         for x in -1..(CHUNK_SIZE+1) as i32{
             for z in -1..(CHUNK_SIZE+1) as i32{
                 let pos2d = Vec2::new(x as f32, z as f32);
-                let mut noise = self.noise_2d(&mut noisegen, 2., pos2d, 9182312)*300.-30.;
+                /*let mut noise = self.noise_2d(&mut noisegen, 2., pos2d, 9182312)*300.-30.;
                 noise += self.noise_2d(&mut noisegen, 1., pos2d, 91872378912)*30.-30.;
                 noise += self.noise_2d(&mut noisegen, 0.2,pos2d, 2131231)*10.-5.;
                 noise *= self.noise_2d(&mut noisegen, 8., pos2d, 8769132)*1.;
                 noise += self.noise_2d(&mut noisegen, 3., pos2d, 1047638)*7.;
                 noise += self.noise_2d(&mut noisegen,0.1 ,pos2d, 2917837893)*5.;
-                
+                noise += -smoothstep(0.1, 0.3, self.noise_2d(&mut celular_noise, 1., pos2d, 987321).powi(2))* 100.;
+                */
+
+                // --- BASE TERRAIN (Remove aggressive small-scale noise) ---
+                let mut noise = self.noise_2d(&mut noisegen, 2., pos2d, 9182312) * 300. - 30.;
+                noise += self.noise_2d(&mut noisegen, 1., pos2d, 91872378912) * 30. - 30.;
+                noise += self.noise_2d(&mut noisegen, 0.6, pos2d, 2131231) * 10. - 5.;
+                noise += self.noise_2d(&mut noisegen, 3., pos2d, 1047638) * 7.;
+                noise += self.noise_2d(&mut noisegen, 0.1, pos2d, 2917837893) * 5.;
+
+                // --- SOFT PERTURBATION (Much lower intensity) ---
+                let perturb = self.noise_2d(&mut noisegen, 4., pos2d, 8769132) * 5. - 2.5; // Less extreme
+                noise += perturb;
+
+                // --- LARGE-SCALE RAVINE MASK (Ensures only some areas get deep ravines) ---
+                let ravine_mask = self.noise_2d(&mut noisegen, 10., pos2d, 5678123); // Lower frequency for large-scale regions
+                let deep_ravine_factor = smoothstep(0.4, 5., ravine_mask); // Controls deep ravine locations
+
+                // --- CELLULAR NOISE FOR RAVINES ---
+                let ravine_base = self.noise_2d(&mut celular_noise, 1., pos2d, 987321);
+                let ravine_depth = smoothstep(0.25, 0.5, 1.0 - ravine_base) * (40. + deep_ravine_factor * 80.); // Lower max depth
+
+                // --- RIDGE ENHANCEMENT (Softer and only in key places) ---
+                let ridge_factor = (1.0 - ravine_base).powi(2) * 20. * deep_ravine_factor; // Lower ridge intensity
+
+                // --- APPLY RAVINES WITH SMOOTHER BLENDING ---
+                noise = mix(noise, noise - ravine_depth, deep_ravine_factor * 0.8); // Less extreme ravine effect
+                noise += ridge_factor;
+                 
 
                 for y in -1..(CHUNK_SIZE+1) as i32 {
                     let pos = IVec3::new(x as i32,y as i32,z as i32);
                     if ((pos.y + self.chunk_position.as_ivec3().y * CHUNK_SIZE as i32) as f32)< noise{
                         //println!("here");
                         block_counter += 1;
-                        if  x<0 || x>= CHUNK_SIZE as i32||
-                            z<0 || z>= CHUNK_SIZE as i32||
-                            y<0 || y>= CHUNK_SIZE as i32 {
-                            let dir = Direction::from_offset(pos);
-                            let wrapped = Self::wrap_to_boundary_2d(pos, &dir);
-                            neighbour_data.set(dir, wrapped.x, wrapped.y, 1);
-                            continue;
+
+                        let mut count = 0;
+                        if x < 0 || x >= CHUNK_SIZE as i32 { count += 1; }
+                        if z < 0 || z >= CHUNK_SIZE as i32 { count += 1; }
+                        if y < 0 || y >= CHUNK_SIZE as i32 { count += 1; }
+                        match count{
+                            0 =>{
+                                let i = Self::pos_to_index(pos);
+                                data[i] = 1;
+
+                            },
+                            1 =>{
+                                let dir = Direction::from_offset(pos);
+                                let wrapped = Self::wrap_to_boundary_2d(pos, &dir);
+                                neighbour_data.set(dir, wrapped.x, wrapped.y, 1);
+                            },
+                            _ => {}
                         }
-                        
-                        let i = Self::pos_to_index(pos);
-                        data[i] = 1;
                     }
                 }
             }
@@ -165,7 +201,8 @@ impl Chunk {
 
 
     pub fn cull_mesher(&self) -> Mesh {
-        let chunk_data = self.data;
+        if let (Some(ref chunk_data), Some(nbd)) = (self.data, self.neighbour_block_data.clone()){
+
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
         /*mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION,
                               vec![
@@ -278,7 +315,7 @@ impl Chunk {
                         ];
         
                         for (offset, face, norm, flipped) in neighbors.iter_mut() {
-                            if self.get_neighboured(ipos + *offset) == 0 {
+                            if Self::get_neighboured(&chunk_data, &nbd,ipos + *offset) == 0 {
                                 ind_positions.append(face);
                                 normals.append(&mut norm.clone());
                                 indices.append(&mut ind_vec!(ind, *flipped));
@@ -296,11 +333,14 @@ impl Chunk {
         mesh.insert_indices(Indices::U32(indices));
         mesh
     }
-
-    pub fn is_empty(&self) -> bool{
-        self.data.iter().all(|b| b == &0) || self.data.iter().all(|b| b >= &1)
+        else{
+            panic!("no data")
+        }
     }
 
+    //pub fn is_empty(&self) -> bool{
+    //    self.data.iter().all(|b| b == &0) || self.data.iter().all(|b| b >= &1)
+    //}
 }
 
 #[derive(Clone)]
@@ -434,3 +474,14 @@ pub struct ProcessingMeshing(pub Task<Mesh>);
 
 #[derive(Component)]
 pub struct NeedsToUpdateNeighbours;
+
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+
+fn mix(a: f32, b: f32, t: f32) -> f32 {
+    a * (1.0 - t) + b * t
+}
