@@ -8,6 +8,7 @@ bevy = { version = "0.15.1", features = ["dynamic_linking"] }
 bevy_flycam = "*"
 noise = "*"
 fastnoise-lite = "1.1.1"
+rayon = "1.10.0"
 
 
 

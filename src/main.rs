@@ -2,6 +2,7 @@ use std::ops::Add;
 use std::time::Instant;
 use bevy::asset::io::ErasedAssetWriter;
 use bevy::prelude::*;
+use rayon::prelude::*;
 use bevy::render::primitives::Aabb;
 use bevy::tasks::{block_on, AsyncComputeTaskPool};
 use bevy::tasks::futures_lite::{future, StreamExt};
@@ -15,7 +16,7 @@ mod components;
 
 
 
-const RENDER_DISTANCE: i32 = 8;
+const RENDER_DISTANCE: i32 = 10;
 
 
 fn main() {
@@ -44,7 +45,7 @@ impl Plugin for Setup {
         app.insert_resource(ChunkLoadQueue{queue: VecDeque::new()});
 
 
-        app.add_systems(Startup, (spawn_test_chunks, prepare_scene));
+        app.add_systems(Startup, (spawn_test_chunks, prepare_scene, preload_assets));
         app.add_systems(Update, (generate_chunks_async,poll_chunk_generations));
         app.add_systems(Update, (mesh_chunks_async,poll_chunk_meshing));
         // app.add_systems(Update, (update_neighbour_data));
@@ -172,31 +173,73 @@ fn spawn_chunks_around_player(
         }
     }
 }
+#[derive(Resource)]
+struct PreloadedAssets {
+    material_handle: Handle<StandardMaterial>,
+    // Add other asset handles as needed
+}
 
+// System to preload assets
+fn preload_assets(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    // Add other asset resources as needed
+) {
+    // Create and add the material to the asset server
+    let material_handle = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        cull_mode: None,
+        ..Default::default()
+    });
+
+    // Insert the handles into the PreloadedAssets resource
+    commands.insert_resource(PreloadedAssets {
+        material_handle,
+        // Initialize other asset handles
+    });
+}
+
+// System to spawn queued chunks
 fn spawn_queued_chunks(
     mut commands: Commands,
-
     mut cqueue: ResMut<ChunkLoadQueue>,
-    time: Res<Time>,
-    mut frame_timer: Local<f32>,
-
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    preloaded_assets: Res<PreloadedAssets>,
     mut chunks: ResMut<Chunks>,
-){
+) {
     let max_spawns_per_frame = 500;
-    for i in 0..max_spawns_per_frame{
-        if let Some(pos) = cqueue.queue.pop_front(){
-            spawn_chunk(
-                &mut commands,
-                &mut chunks,
-                &mut materials,
-                ChunkPosition::from_ivec(pos)
-            )
-        }
-        else{
-            break;
-        }
+
+    // Collect up to `max_spawns_per_frame` positions from the queue
+    let positions: Vec<IVec3> = cqueue.queue.drain(..).take(max_spawns_per_frame).collect();
+
+    // Generate chunk data in parallel (excluding asset creation)
+    let chunk_data: Vec<(ChunkPosition, Chunk, Transform, Aabb)> = positions
+        .par_iter()
+        .map(|&pos| {
+            let chunk_position = ChunkPosition::from_ivec(pos);
+            let chunk = Chunk::new(&chunk_position);
+            let transform = Transform::from_translation(
+                chunk_position.as_ivec3().as_vec3() * CHUNK_SIZE as f32,
+            );
+            let aabb = Aabb::from_min_max(Vec3::ZERO, Vec3::splat(CHUNK_SIZE as f32));
+
+            (chunk_position, chunk, transform, aabb)
+        })
+        .collect();
+
+    // Spawn entities sequentially using preloaded asset handles
+    for (chunk_position, chunk, transform, aabb) in chunk_data {
+        let chunk_ent = commands
+            .spawn((
+                chunk,
+                transform,
+                NeedsGeneration,
+                MeshMaterial3d(preloaded_assets.material_handle.clone()),
+                aabb,
+                ProcessingLock,
+            ))
+            .id();
+
+        chunks.insert(chunk_position, chunk_ent);
     }
 }
 
@@ -256,13 +299,13 @@ fn spawn_chunk(
 
 
 fn generate_chunks_async(
-    mut commands: Commands,
+    commands: ParallelCommands,
     chunk_ents: Query<(Entity, &Chunk), With<NeedsGeneration>>,
     chunks: Res<Chunks>,
 ) {
     let thread_pool = AsyncComputeTaskPool::get();
 
-    for (entity, chunk) in chunk_ents.iter(){
+    chunk_ents.par_iter().for_each(|(entity, chunk)|{
         let chunk_clone = chunk.clone(); // Clone the chunk data
         let task = thread_pool.spawn(async move {
             let start_time = Instant::now(); // Record the start time
@@ -271,9 +314,11 @@ fn generate_chunks_async(
             println!("Generation completed in: {:?}", duration);
             data
         });
-        commands.entity(entity).insert((ProcessingGeneration(task), ProcessingLock));
-        commands.entity(entity).remove::<NeedsGeneration>();
-    }
+        commands.command_scope(|mut comm|{
+            comm.entity(entity).insert((ProcessingGeneration(task), ProcessingLock));
+            comm.entity(entity).remove::<NeedsGeneration>();
+        });
+    });
 }
 
 
@@ -297,12 +342,12 @@ fn poll_chunk_generations(
 }
 
 fn mesh_chunks_async(
-    mut commands: Commands,
+    par_commands: ParallelCommands,
     chunk_ents: Query<(Entity, &Chunk), With<NeedsMeshing>>,
 ) {
     let thread_pool = AsyncComputeTaskPool::get();
 
-    for (entity, chunk) in chunk_ents.iter(){
+    chunk_ents.par_iter().for_each(|(entity, chunk)|{
         let chunk_clone = chunk.clone(); // Clone the chunk data
         let task = thread_pool.spawn(async move {
             let start_time = Instant::now(); // Record the start time
@@ -311,18 +356,19 @@ fn mesh_chunks_async(
             println!("Meshing completed in: {:?}", duration);
             mesh
         });
-
-        commands.entity(entity).insert((ProcessingMeshing(task)));
-        commands.entity(entity).remove::<NeedsMeshing>();
-    }
+        par_commands.command_scope(|mut commands|{
+            commands.entity(entity).insert(ProcessingMeshing(task));
+            commands.entity(entity).remove::<NeedsMeshing>();
+        });
+    });
 }
 
 fn poll_chunk_meshing(
     mut commands: Commands,
-    mut chunk_ents: Query<(Entity, &mut Chunk, &mut ProcessingMeshing)>,
+    mut chunk_ents: Query<(Entity, &mut ProcessingMeshing)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ){
-    for (entity, mut chunk, mut gen_task) in chunk_ents.iter_mut(){
+    for (entity, mut gen_task) in chunk_ents.iter_mut(){
         if let Some(mesh) = block_on(future::poll_once(&mut gen_task.0)){
             let mesh_handle = meshes.add(mesh);
             commands.entity(entity).insert(Mesh3d(mesh_handle));
