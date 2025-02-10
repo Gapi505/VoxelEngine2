@@ -205,7 +205,7 @@ impl Chunk {
     fn chunk_noise(chunk_position: &ChunkPosition) -> Vec<f32>{
         let worldpos = chunk_position.as_ivec3()*CHUNK_SIZE as i32;
         let noise = NoiseBuilder::fbm_2d_offset(worldpos.x as f32 - 1., CHUNK_SIZE+2, worldpos.z as f32- 1., CHUNK_SIZE+2)
-            .with_freq(0.05)
+            .with_freq(0.01)
             .with_seed(829824)
             .with_octaves(9)
             //.with_lacunarity(2.0)

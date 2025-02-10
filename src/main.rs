@@ -10,7 +10,7 @@ use bevy::utils::futures;
 use bevy_flycam::prelude::*;
 use bevy::pbr::{CascadeShadowConfigBuilder, NotShadowCaster};
 use std::collections::VecDeque;
-
+use std::sync::Arc;
 use components::*;
 mod components;
 
@@ -301,15 +301,14 @@ fn spawn_chunk(
 fn generate_chunks_async(
     commands: ParallelCommands,
     chunk_ents: Query<(Entity, &Chunk), With<NeedsGeneration>>,
-    chunks: Res<Chunks>,
 ) {
     let thread_pool = AsyncComputeTaskPool::get();
 
     chunk_ents.par_iter().for_each(|(entity, chunk)|{
-        let chunk_clone = chunk.clone(); // Clone the chunk data
+        let chunk_pos = chunk.chunk_position.clone(); // Clone the chunk data
         let task = thread_pool.spawn(async move {
             let start_time = Instant::now(); // Record the start time
-            let data = chunk_clone.generate();
+            let data = Chunk::generate(chunk_pos);
             let duration = start_time.elapsed(); // Measure elapsed time
             println!("Generation completed in: {:?}", duration);
             data

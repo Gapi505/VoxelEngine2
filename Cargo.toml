@@ -9,7 +9,7 @@ bevy_flycam = "*"
 noise = "*"
 fastnoise-lite = "1.1.1"
 rayon = "1.10.0"
-
+simdnoise = "3.1.6"
 
 
 
