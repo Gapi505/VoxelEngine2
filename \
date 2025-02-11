@@ -44,7 +44,7 @@ impl Plugin for Setup {
         // app.add_systems(Update, (update_neighbour_data));
         app.add_systems(Update, (spawn_chunks_around_player, spawn_queued_chunks, destroy_chunks_away_from_player, move_skybox));
 
-        app.add_systems(FixedUpdate, (drone_controller, move_drone_camera));
+        app.add_systems(FixedUpdate, (drone_controller));
     }
 }
 
@@ -125,7 +125,6 @@ fn spawn_player(
     let drone = commands.spawn((
         Player,
         drone_controller.clone(),
-        Transform::from_xyz(0., 100., 0.),
         RigidBody::Dynamic,
         Collider::cuboid(drone_controller.size.x, drone_controller.size.y, drone_controller.size.z),
     ));
@@ -142,10 +141,6 @@ fn spawn_player(
                 Color::srgb(0.8,0.844,1.)
             )
         },
-        Projection::from(PerspectiveProjection{
-            fov: 55f32.to_radians(),
-            ..default()
-        }),
         DroneCamera,
     ));
 }
@@ -181,9 +176,10 @@ impl DroneController {
             angular_speed: 3.0,
 
             top_speed: 50.0,
-            cam_offset: Transform::from_xyz(0.,0.04,0.08).with_rotation(Quat::from_rotation_x(25f32.to_radians())),
-            drag_top: 0.996,
-            drag_side: 0.999,
+            cam_offset: Transform::with_translation(Vec3::new(0.,0.4, 0.8)).with_rotation(Quat::from_rotation_x(30.))
+
+            drag_top: 0.98,
+            drag_side: 0.99,
 
             roll_pid: PID::new(0.5, 0.0, 0.05), // Default gains
             pitch_pid: PID::new(0.5, 0.0, 0.05), // Default gains
@@ -309,14 +305,13 @@ fn drone_controller(
 }
 
 fn move_drone_camera(
-    mut drone_cams: Query<(Entity, &mut Transform), With<Camera3d>>,
-    drones: Query<(Entity, &Transform, &DroneController), Without<Camera3d>>
+    drone_cams: Query<(Entity, &mut Transform)>,
+    drones: Query<(Entity, &Transform, &DroneController)>
 ){
-    let (cam, mut cam_transform) = drone_cams.get_single_mut().unwrap();
-    let (drone, drone_transform, controller) = drones.get_single().unwrap();
+    let (cam, mut cam_transform) = drone_cams.get_single_mut();
+    let (drone, drone_transform, controller) = drones.get_single_mut();
 
-    cam_transform.translation = drone_transform.translation+controller.cam_offset.translation;
-    cam_transform.rotation = drone_transform.rotation * controller.cam_offset.rotation;
+    let offset = 
 }
 
 #[derive(Component)]
