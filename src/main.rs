@@ -58,7 +58,7 @@ impl Plugin for Setup {
         app.insert_resource(ChunkLoadQueue{queue: VecDeque::new()});
 
 
-        app.add_systems(Startup, (spawn_test_chunks, prepare_scene, preload_assets, spawn_player));
+        app.add_systems(Startup, (prepare_scene, preload_assets, spawn_player));
         app.add_systems(Update, (generate_chunks_async,poll_chunk_generations));
         app.add_systems(Update, (mesh_chunks_async,poll_chunk_meshing));
         // app.add_systems(Update, (update_neighbour_data));
@@ -75,6 +75,7 @@ impl Plugin for PostProcessPlugin{
             ExtractComponentPlugin::<PostProcessSettings>::default(),
             UniformComponentPlugin::<PostProcessSettings>::default(),
         ));
+        app.add_systems(Update, adjust_noise_shader);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {return;};
         render_app
             .add_render_graph_node::<ViewNodeRunner<PostProcessNode>>(
@@ -231,9 +232,23 @@ impl FromWorld for PostProcessPipeline {
 #[derive(Component, Default, Clone, Copy, ExtractComponent, ShaderType)]
 struct PostProcessSettings {
     noise_strenght: f32,
+    frame: f32,
     // WebGL2 structs must be 16 byte aligned.
     #[cfg(feature = "webgl2")]
     _webgl2_padding: Vec3,
+}
+
+fn adjust_noise_shader(
+    mut settings: Query<&mut PostProcessSettings>,
+    drone: Query<(&LinearVelocity, &DroneController)>,
+    time: Res<Time>,
+){
+    let dt = time.delta_secs();
+    let (speed, controller) = drone.get_single().unwrap();
+    for mut setting in &mut settings{
+        //setting.noise_strenght = 0.3f32.lerp(0.95, speed.length().clamp(0., controller.top_speed)/controller.top_speed);
+        setting.frame += dt*60.;
+    }
 }
 
 
@@ -292,6 +307,8 @@ fn spawn_ui(
 fn spawn_player(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ){
     let far_distance = (RENDER_DISTANCE*CHUNK_SIZE as i32) as f32;
     let drone_controller = DroneController::new();
@@ -315,7 +332,7 @@ fn spawn_player(
         Collider::cuboid(drone_controller.size.x, drone_controller.size.y, drone_controller.size.z)
         ));*/
 
-    let mut render_image = Image::new_fill(
+    /*let mut render_image = Image::new_fill(
         Extent3d{
             width: 720,
             height: 600,
@@ -329,22 +346,18 @@ fn spawn_player(
     render_image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
 
 
-    let render_image_handle = images.add(render_image);
+    let render_image_handle = images.add(render_image);*/
 
     let drone = commands.spawn((
         Player,
         drone_controller.clone(),
-        Transform::from_xyz(0., 100., 0.),
+        Transform::from_xyz(1400., -50., 750.).with_rotation(Quat::from_rotation_y(45f32.to_radians())),
         RigidBody::Dynamic,
         Collider::cuboid(drone_controller.size.x, drone_controller.size.y, drone_controller.size.z),
     ));
 
     let camera = commands.spawn((
         Camera3d::default(),
-        Camera{
-            target: render_image_handle.clone().into(),
-            ..default()
-        },
         DistanceFog{
             color: Color::srgb(0.35, 0.48, 0.66),
             directional_light_color: Color::srgba(1., 0.95, 0.85, 0.5),
@@ -356,15 +369,16 @@ fn spawn_player(
             )
         },
         Projection::from(PerspectiveProjection{
-            fov: 55f32.to_radians(),
+            fov: 45f32.to_radians(),
             ..default()
         }),
         DroneCamera,
         PostProcessSettings{
-            noise_strenght: 0.04,
+            noise_strenght: 0.1,
             ..default()
         }
     ));
+
 }
 
 #[derive(Component)]
@@ -394,18 +408,18 @@ impl DroneController {
     fn new() -> Self {
         Self {
             size: Vec3::new(0.17, 0.05, 0.17),
-            motor_strength: 8.0,
-            angular_speed: 3.0,
+            motor_strength: 10.0,
+            angular_speed: 6.0,
 
             top_speed: 50.0,
             cam_offset: Transform::from_xyz(0.,0.04,0.08).with_rotation(Quat::from_rotation_x(25f32.to_radians())),
-            drag_top: 0.996,
-            drag_side: 0.999,
+            drag_top: 0.994,
+            drag_side: 0.998,
 
-            roll_pid: PID::new(0.5, 0.0, 0.05), // Default gains
-            pitch_pid: PID::new(0.5, 0.0, 0.05), // Default gains
-            yaw_pid: PID::new(0.5, 0.0, 0.05), // Default gains
-            impulse_threshold: 0.5, // Threshold for impulse correction
+            roll_pid: PID::new(1., 0.0, 0.12), // Default gains
+            pitch_pid: PID::new(1., 0.0, 0.12), // Default gains
+            yaw_pid: PID::new(1., 0.0, 0.12), // Default gains
+            impulse_threshold: 0.1, // Threshold for impulse correction
             impulse_gain: 0.2, // Strength of impulse correction
         }
     }
@@ -480,10 +494,15 @@ fn drone_controller(
     for (entity, gamepad) in &gamepads{
         let throtle = gamepad.get(GamepadAxis::LeftStickY).unwrap().max(0.);
         
-        let yaw = gamepad.get(GamepadAxis::LeftStickX).unwrap();
-        let pitch = gamepad.get(GamepadAxis::RightStickY).unwrap();
-        let roll = gamepad.get(GamepadAxis::RightStickX).unwrap();
-        
+        let mut yaw = gamepad.get(GamepadAxis::LeftStickX).unwrap();
+        let mut pitch = gamepad.get(GamepadAxis::RightStickY).unwrap();
+        let mut roll = gamepad.get(GamepadAxis::RightStickX).unwrap();
+        let curve = 1.5;
+
+        yaw = adjust_input(yaw, curve);
+        pitch = adjust_input(pitch, curve);
+        roll = adjust_input(roll, curve);
+
         let target_ang_vel = -Vec3::new(pitch, yaw, roll) *controller.angular_speed;
         let local_ang_vel = transform.rotation.inverse() * angular.0;
 
@@ -506,13 +525,16 @@ fn drone_controller(
         
 
         let mut local_lin = transform.rotation.inverse() * linear.0;
+        let top_speed = Vec3::Y * controller.top_speed;
+        let relative_wind = (controller.top_speed - local_lin.y).clamp(0., controller.top_speed);
+        let throttle_effectiveness = relative_wind / controller.top_speed;
 
         let drag_dot = Vec3::Y.dot(local_lin.normalize_or(Vec3::Y)) /2. +0.5;
         let drag_coeficient = controller.drag_side.lerp(controller.drag_top, drag_dot);
 
         local_lin *= drag_coeficient;
 
-        local_lin += Vec3::Y * throtle * dt;
+        local_lin += Vec3::Y * throtle * dt * throttle_effectiveness;
 
         linear.0 = transform.rotation * local_lin;
 
@@ -523,6 +545,13 @@ fn drone_controller(
 
         //println!("{}, {}, {}, {}",throtle, movedir, speed, airspeed)
     }
+}
+
+
+fn adjust_input(x: f32, exponent: f32) -> f32 {
+    let sign = x.signum(); // Keep track of the original sign
+    let abs_x = x.abs(); // Work with positive values
+    sign * abs_x.powf(exponent) // Apply non-linear scaling and restore sign
 }
 
 fn move_drone_camera(
@@ -608,7 +637,7 @@ fn preload_assets(
 ) {
     // Create and add the material to the asset server
     let material_handle = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
+        base_color: Color::srgb(0.8, 0.9, 0.8),
         cull_mode: None,
         ..Default::default()
     });
@@ -790,10 +819,10 @@ fn poll_chunk_meshing(
 ){
     for (entity, mut gen_task) in chunk_ents.iter_mut(){
         if let Some(mesh) = block_on(future::poll_once(&mut gen_task.0)){
-            let mesh_handle = meshes.add(mesh);
-            commands.entity(entity).insert(Mesh3d(mesh_handle));
             commands.entity(entity).remove::<ProcessingMeshing>();
             commands.entity(entity).remove::<ProcessingLock>();
+            let mesh_handle = meshes.add(mesh);
+            commands.entity(entity).insert(Mesh3d(mesh_handle));
             //println!("meshed")
         }
     }

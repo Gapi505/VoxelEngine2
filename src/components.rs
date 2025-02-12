@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::tasks::Task;
 use bevy::utils::HashMap;
-use noise::{NoiseFn, Perlin};
+use noise::NoiseFn;
 use fastnoise_lite::{NoiseType, FastNoiseLite};
 use simdnoise::*;
 
@@ -86,9 +86,9 @@ impl Chunk {
 
     fn wrap_to_local(pos: IVec3) -> IVec3 {
         IVec3::new(
-            (pos.x.rem_euclid(CHUNK_SIZE as i32)),
-            (pos.y.rem_euclid(CHUNK_SIZE as i32)),
-            (pos.z.rem_euclid(CHUNK_SIZE as i32)),
+            pos.x.rem_euclid(CHUNK_SIZE as i32),
+            pos.y.rem_euclid(CHUNK_SIZE as i32),
+            pos.z.rem_euclid(CHUNK_SIZE as i32),
         )
     }
     pub fn wrap_to_boundary_2d(pos: IVec3, direction: &Direction) -> IVec2 {
@@ -277,7 +277,7 @@ impl Chunk {
             [0., 0., -1.]];
 
         let mut ind = 0;
-        let mut i = 0;
+        let i = 0;
 
         for x in 0..(CHUNK_SIZE) as i32{
             for z in 0..(CHUNK_SIZE) as i32{
