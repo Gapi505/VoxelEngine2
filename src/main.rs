@@ -1,29 +1,49 @@
-use std::ops::Add;
+use std::collections::VecDeque;
 use std::time::Instant;
-use bevy::asset::io::ErasedAssetWriter;
+
+use bevy::pbr::{CascadeShadowConfigBuilder, NotShadowCaster};
 use bevy::prelude::*;
-use rayon::prelude::*;
 use bevy::render::primitives::Aabb;
 use bevy::tasks::{block_on, AsyncComputeTaskPool};
 use bevy::tasks::futures_lite::{future, StreamExt};
-use bevy::utils::futures;
-use bevy_flycam::prelude::*;
-use bevy::pbr::{CascadeShadowConfigBuilder, NotShadowCaster};
-use std::collections::VecDeque;
-use std::sync::Arc;
-use components::*;
-mod components;
-use avian3d::prelude::*;
-use bevy::input::gamepad::{GamepadConnection, GamepadEvent};
+use bevy::render::{
+        extract_component::{
+            ComponentUniforms, DynamicUniformIndex, ExtractComponent, ExtractComponentPlugin,
+            UniformComponentPlugin,
+        },
+        render_graph::{
+            NodeRunError, RenderGraphApp, RenderGraphContext, RenderLabel, ViewNode, ViewNodeRunner,
+        },
+        render_resource::{
+            binding_types::{sampler, texture_2d, uniform_buffer},
+            *,
+        },
+        renderer::{RenderContext, RenderDevice},
+        view::ViewTarget,
+        RenderApp,
+        render_asset::RenderAssetUsages,
+    };
+use bevy::ecs::query::QueryItem;
+use bevy::core_pipeline::{
+    core_3d::graph::{Core3d,Node3d},
+    fullscreen_vertex_shader::fullscreen_shader_vertex_state
+};
 
+use rayon::prelude::*;
+
+use avian3d::prelude::*;
+
+mod components;
+use components::*;
 
 
 const RENDER_DISTANCE: i32 = 10;
+const SHADER_ASSET_PATH: &str = "shaders/post.wgsl";
 
 
 fn main() {
     let mut app = App::new();
-    app.add_plugins((DefaultPlugins, Setup));
+    app.add_plugins((DefaultPlugins, Setup, PostProcessPlugin));
 
     app.run();
 }
@@ -46,6 +66,174 @@ impl Plugin for Setup {
 
         app.add_systems(FixedUpdate, (drone_controller, move_drone_camera));
     }
+}
+
+struct PostProcessPlugin;
+impl Plugin for PostProcessPlugin{
+    fn build(&self, app: &mut App) {
+        app.add_plugins((
+            ExtractComponentPlugin::<PostProcessSettings>::default(),
+            UniformComponentPlugin::<PostProcessSettings>::default(),
+        ));
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {return;};
+        render_app
+            .add_render_graph_node::<ViewNodeRunner<PostProcessNode>>(
+                Core3d,
+                PostProcessLabel,
+            )
+            .add_render_graph_edges(
+                Core3d,
+                (
+                    Node3d::Tonemapping,
+                    PostProcessLabel,
+                    Node3d::EndMainPassPostProcessing,
+                ),
+            );
+    }
+    fn finish(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {return;};
+        render_app
+            .init_resource::<PostProcessPipeline>();
+    }
+}
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct PostProcessLabel;
+#[derive(Default)]
+struct PostProcessNode;
+
+impl ViewNode for PostProcessNode{
+    type ViewQuery = (
+        &'static ViewTarget,
+        &'static PostProcessSettings,
+        &'static DynamicUniformIndex<PostProcessSettings>,
+    );
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (view_target, _post_process_settings, settings_index): QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError>{
+        let post_process_pipeline =  world.resource::<PostProcessPipeline>();
+        let pipeline_chace = world.resource::<PipelineCache>();
+        let Some(pipeline) = pipeline_chace.get_render_pipeline(post_process_pipeline.pipeline_id) else {return Ok(());};
+        let settings_uniforms = world.resource::<ComponentUniforms<PostProcessSettings>>();
+        let Some(settings_binding) = settings_uniforms.uniforms().binding() else {return Ok(());};
+
+        let post_process = view_target.post_process_write();
+
+        let bind_group = render_context.render_device().create_bind_group(
+            "post_process_bind_group",
+            &post_process_pipeline.layout,
+            &BindGroupEntries::sequential((
+                post_process.source,
+                &post_process_pipeline.sampler,
+                settings_binding.clone(),
+            )),
+        );
+
+        let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor{
+            label: Some("post_process_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment{
+                view: post_process.destination,
+                resolve_target: None,
+                ops: Operations::default()
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        render_pass.set_render_pipeline(pipeline);
+        render_pass.set_bind_group(0, &bind_group, &[settings_index.index()]);
+        render_pass.draw(0..3,0..1);
+        Ok(())
+
+    }
+}
+
+
+
+// This contains global data used by the render pipeline. This will be created once on startup.
+#[derive(Resource)]
+struct PostProcessPipeline {
+    layout: BindGroupLayout,
+    sampler: Sampler,
+    pipeline_id: CachedRenderPipelineId,
+}
+
+impl FromWorld for PostProcessPipeline {
+    fn from_world(world: &mut World) -> Self {
+        let render_device = world.resource::<RenderDevice>();
+
+        // We need to define the bind group layout used for our pipeline
+        let layout = render_device.create_bind_group_layout(
+            "post_process_bind_group_layout",
+            &BindGroupLayoutEntries::sequential(
+                // The layout entries will only be visible in the fragment stage
+                ShaderStages::FRAGMENT,
+                (
+                    // The screen texture
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    // The sampler that will be used to sample the screen texture
+                    sampler(SamplerBindingType::Filtering),
+                    // The settings uniform that will control the effect
+                    uniform_buffer::<PostProcessSettings>(true),
+                ),
+            ),
+        );
+
+        // We can create the sampler here since it won't change at runtime and doesn't depend on the view
+        let sampler = render_device.create_sampler(&SamplerDescriptor::default());
+
+        // Get the shader handle
+        let shader = world.load_asset(SHADER_ASSET_PATH);
+
+        let pipeline_id = world
+            .resource_mut::<PipelineCache>()
+            // This will add the pipeline to the cache and queue its creation
+            .queue_render_pipeline(RenderPipelineDescriptor {
+                label: Some("post_process_pipeline".into()),
+                layout: vec![layout.clone()],
+                // This will setup a fullscreen triangle for the vertex state
+                vertex: fullscreen_shader_vertex_state(),
+                fragment: Some(FragmentState {
+                    shader,
+                    shader_defs: vec![],
+                    // Make sure this matches the entry point of your shader.
+                    // It can be anything as long as it matches here and in the shader.
+                    entry_point: "fragment".into(),
+                    targets: vec![Some(ColorTargetState {
+                        format: TextureFormat::bevy_default(),
+                        blend: None,
+                        write_mask: ColorWrites::ALL,
+                    })],
+                }),
+                // All of the following properties are not important for this effect so just use the default values.
+                // This struct doesn't have the Default trait implemented because not all fields can have a default value.
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                push_constant_ranges: vec![],
+                zero_initialize_workgroup_memory: false,
+            });
+
+        Self {
+            layout,
+            sampler,
+            pipeline_id,
+        }
+    }
+}
+
+// This is the component that will get passed to the shader
+#[derive(Component, Default, Clone, Copy, ExtractComponent, ShaderType)]
+struct PostProcessSettings {
+    noise_strenght: f32,
+    // WebGL2 structs must be 16 byte aligned.
+    #[cfg(feature = "webgl2")]
+    _webgl2_padding: Vec3,
 }
 
 
@@ -96,9 +284,14 @@ fn prepare_scene(
 }
 
 
+fn spawn_ui(
+    mut commands: Commands,
+){
+}
 
 fn spawn_player(
     mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
 ){
     let far_distance = (RENDER_DISTANCE*CHUNK_SIZE as i32) as f32;
     let drone_controller = DroneController::new();
@@ -122,6 +315,22 @@ fn spawn_player(
         Collider::cuboid(drone_controller.size.x, drone_controller.size.y, drone_controller.size.z)
         ));*/
 
+    let mut render_image = Image::new_fill(
+        Extent3d{
+            width: 720,
+            height: 600,
+            ..default()
+        },
+        TextureDimension::D2,
+        &[0,0,0,255],
+        TextureFormat::Bgra8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    render_image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT;
+
+
+    let render_image_handle = images.add(render_image);
+
     let drone = commands.spawn((
         Player,
         drone_controller.clone(),
@@ -132,6 +341,10 @@ fn spawn_player(
 
     let camera = commands.spawn((
         Camera3d::default(),
+        Camera{
+            target: render_image_handle.clone().into(),
+            ..default()
+        },
         DistanceFog{
             color: Color::srgb(0.35, 0.48, 0.66),
             directional_light_color: Color::srgba(1., 0.95, 0.85, 0.5),
@@ -147,6 +360,10 @@ fn spawn_player(
             ..default()
         }),
         DroneCamera,
+        PostProcessSettings{
+            noise_strenght: 0.04,
+            ..default()
+        }
     ));
 }
 
