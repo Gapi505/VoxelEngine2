@@ -62,8 +62,9 @@ impl Plugin for Setup {
         app.add_systems(Startup, (prepare_scene, preload_assets, spawn_player, spawn_ui));
         app.add_systems(Update, (generate_chunks_async,poll_chunk_generations));
         app.add_systems(Update, (mesh_chunks_async,poll_chunk_meshing));
+        app.add_systems(Update, (construct_colliders_async,poll_colliders));
         // app.add_systems(Update, (update_neighbour_data));
-        app.add_systems(Update, (spawn_chunks_around_player, spawn_queued_chunks, destroy_chunks_away_from_player, move_skybox));
+        app.add_systems(Update, (spawn_chunks_around_player, spawn_queued_chunks, destroy_chunks_away_from_player, move_skybox, handle_nearby_colliders));
 
         app.add_systems(FixedUpdate, (drone_controller, move_drone_camera));
     }
@@ -480,7 +481,7 @@ impl DroneController {
             angular_speed: 6.0,
 
             top_speed: 50.0,
-            cam_offset: Transform::from_xyz(0.,0.04,0.08).with_rotation(Quat::from_rotation_x(25f32.to_radians())),
+            cam_offset: Transform::from_xyz(0.0,0.09,0.00).with_rotation(Quat::from_rotation_x(25f32.to_radians())),
             drag_top: 0.994,
             drag_side: 0.998,
 
@@ -690,6 +691,28 @@ fn spawn_chunks_around_player(
         }
     }
 }
+
+fn handle_nearby_colliders(
+    mut commands: Commands,
+    chunks: Query<(Entity, &Chunk, Has<Collider>), Without<ProcessingLock>>,
+    player: Query<&Transform, With<Player>>
+){
+    let player = player.get_single().unwrap();
+    let player_chunkpos = ChunkPosition::from_world_pos(player.translation.as_ivec3()).as_ivec3();
+    for (entity, chunk, has_collider) in chunks.iter(){
+        let dist = (player_chunkpos - chunk.chunk_position.as_ivec3()).abs();
+        if dist.x <= 1 && dist.y <= 1 && dist.z <= 1 {
+            if !has_collider {
+                commands.entity(entity).insert((NeedsCollider, ProcessingLock));
+            }
+        }
+        else{
+            commands.entity(entity).remove::<Collider>();
+            commands.entity(entity).remove::<RigidBody>();
+        }
+    }  
+}
+
 #[derive(Resource)]
 struct PreloadedAssets {
     material_handle: Handle<StandardMaterial>,
@@ -897,7 +920,39 @@ fn poll_chunk_meshing(
     }
 }
 
+fn construct_colliders_async(
+    par_commands: ParallelCommands,
+    chunk_ents: Query<(Entity, &Chunk), With<NeedsCollider>>
+){
+    let thread_pool = AsyncComputeTaskPool::get();
+    chunk_ents.par_iter().for_each(|(entity, chunk)|{
+        let chunk_clone = chunk.clone();
+        let task = thread_pool.spawn( async move{
+            let collider = chunk_clone.construct_collider();
+            collider
+        });
+        par_commands.command_scope(|mut commands|{
+            commands.entity(entity).insert(ProcessingCollider(task));
+            commands.entity(entity).remove::<NeedsCollider>();
+        })
+    })
+}
 
+fn poll_colliders(
+    mut commands: Commands,
+    mut chunk_ents: Query<(Entity, &mut ProcessingCollider)>
+){
+    for (ent, mut coll_task) in chunk_ents.iter_mut(){
+        if let Some(coll) = block_on(future::poll_once(&mut coll_task.0)){
+            if let Some(collider) = coll{
+                commands.entity(ent).insert((collider, RigidBody::Static));
+                println!("spawned collider")
+            }
+            commands.entity(ent).remove::<ProcessingCollider>();
+            commands.entity(ent).remove::<ProcessingLock>();
+        }
+    }
+}
 
 
 #[derive(Component)]

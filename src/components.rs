@@ -373,7 +373,7 @@ impl Chunk {
                         }
                         if is_exposed{
                             let collider = Collider::cuboid(1.,1.,1.);
-                            let pos = Position::from_xyz(x as f32, y as f32, z as f32);
+                            let pos = Position::from_xyz(x as f32 + 0.5, y as f32 + 0.5, z as f32 +0.5);
                             let rot = Rotation::default();
                             colliders.push((pos, rot, collider));
                         }
@@ -521,6 +521,11 @@ pub struct ProcessingGeneration(pub Task<([u8; CHUNK_SIZE * CHUNK_SIZE * CHUNK_S
 pub struct NeedsMeshing;
 #[derive(Component)]
 pub struct ProcessingMeshing(pub Task<Mesh>);
+
+#[derive(Component)]
+pub struct NeedsCollider;
+#[derive(Component)]
+pub struct ProcessingCollider(pub Task<Option<Collider>>);
 
 #[derive(Component)]
 pub struct NeedsToUpdateNeighbours;
