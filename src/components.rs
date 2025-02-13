@@ -6,6 +6,7 @@ use bevy::utils::HashMap;
 use noise::NoiseFn;
 use fastnoise_lite::{NoiseType, FastNoiseLite};
 use simdnoise::*;
+use avian3d::prelude::*;
 
 pub const CHUNK_SIZE: usize = 32;
 
@@ -349,6 +350,42 @@ impl Chunk {
         else{
             panic!("no data")
         }
+    }
+    pub fn construct_collider(&self) -> Option<Collider>{
+        let data = self.data.unwrap();
+        let neighbour_block_data = self.neighbour_block_data.clone().unwrap();
+        let mut colliders = Vec::new();
+
+
+        for x in 0..CHUNK_SIZE as i32{
+            for z in 0..CHUNK_SIZE as i32{
+                for y in 0..CHUNK_SIZE as i32{
+                    let ichpos = IVec3::new(x,y,z);
+                    let block = Self::get_raw(&data, ichpos);
+                    if block >= 1{
+                        let mut is_exposed = false;
+                        for offset in Direction::iter(){
+                            let newpos = ichpos + offset.to_ivec();
+                            if Self::get_neighboured(&data, &neighbour_block_data, newpos) == 0 {
+                                is_exposed = true;
+                                break;
+                            }
+                        }
+                        if is_exposed{
+                            let collider = Collider::cuboid(1.,1.,1.);
+                            let pos = Position::from_xyz(x as f32, y as f32, z as f32);
+                            let rot = Rotation::default();
+                            colliders.push((pos, rot, collider));
+                        }
+                    }
+                } 
+            }
+        }
+        
+        if colliders.len() == 0{return None;}
+
+        let compound = Collider::compound(colliders);
+        Some(compound)
     }
 
     //pub fn is_empty(&self) -> bool{

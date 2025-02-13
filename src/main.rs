@@ -28,6 +28,7 @@ use bevy::core_pipeline::{
     core_3d::graph::{Core3d,Node3d},
     fullscreen_vertex_shader::fullscreen_shader_vertex_state
 };
+use bevy::ui::graph::NodeUi;
 
 use rayon::prelude::*;
 
@@ -58,7 +59,7 @@ impl Plugin for Setup {
         app.insert_resource(ChunkLoadQueue{queue: VecDeque::new()});
 
 
-        app.add_systems(Startup, (prepare_scene, preload_assets, spawn_player));
+        app.add_systems(Startup, (prepare_scene, preload_assets, spawn_player, spawn_ui));
         app.add_systems(Update, (generate_chunks_async,poll_chunk_generations));
         app.add_systems(Update, (mesh_chunks_async,poll_chunk_meshing));
         // app.add_systems(Update, (update_neighbour_data));
@@ -85,9 +86,11 @@ impl Plugin for PostProcessPlugin{
             .add_render_graph_edges(
                 Core3d,
                 (
-                    Node3d::Tonemapping,
+                    //Node3d::Tonemapping,
+                    NodeUi::UiPass,
                     PostProcessLabel,
-                    Node3d::EndMainPassPostProcessing,
+                    //Node3d::EndMainPassPostProcessing,
+                    Node3d::Upscaling,
                 ),
             );
     }
@@ -246,7 +249,7 @@ fn adjust_noise_shader(
     let dt = time.delta_secs();
     let (speed, controller) = drone.get_single().unwrap();
     for mut setting in &mut settings{
-        //setting.noise_strenght = 0.3f32.lerp(0.95, speed.length().clamp(0., controller.top_speed)/controller.top_speed);
+        setting.noise_strenght = 0.3f32.lerp(0.95, speed.length().clamp(0., controller.top_speed)/controller.top_speed);
         setting.frame += dt*60.;
     }
 }
@@ -294,7 +297,8 @@ fn prepare_scene(
         })),
         Transform::from_scale(Vec3::splat(far_distance*2.)),
         NotShadowCaster,
-        SkyboxCube
+        SkyboxCube,
+        IsDefaultUiCamera,
     ));
 }
 
@@ -302,6 +306,70 @@ fn prepare_scene(
 fn spawn_ui(
     mut commands: Commands,
 ){
+    commands
+        .spawn(
+            Node{
+                width: Val::Percent(100.),
+                height: Val::Percent(100.),
+                flex_grow: 100.,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        )
+        .with_children(|parent|{
+            parent.spawn((
+                Node{
+                    position_type: PositionType::Relative,
+                    align_self: AlignSelf::Center,
+                    ..default()
+                },
+            )).with_children(|parent|{
+                    parent.spawn((
+                        Node{
+                            width: Val::Vh(0.5),
+                            height: Val::Vh(2.),
+                            position_type: PositionType::Absolute,
+                            bottom: Val::Vh(1.25),
+                            right: Val::Vh(0.25),
+                            ..default()
+                        },
+                        BackgroundColor(Color::WHITE),
+                    ));
+                    parent.spawn((
+                        Node{
+                            width: Val::Vh(0.5),
+                            height: Val::Vh(2.),
+                            position_type: PositionType::Absolute,
+                            top: Val::Vh(0.25),
+                            right: Val::Vh(0.25),
+                            ..default()
+                        },
+                        BackgroundColor(Color::WHITE),
+                    ));
+                    parent.spawn((
+                        Node{
+                            width: Val::Vh(2.),
+                            height: Val::Vh(0.5),
+                            position_type: PositionType::Absolute,
+                            bottom: Val::Vh(0.25),
+                            right: Val::Vh(1.25),
+                            ..default()
+                        },
+                        BackgroundColor(Color::WHITE),
+                    ));
+                    parent.spawn((
+                        Node{
+                            width: Val::Vh(2.),
+                            height: Val::Vh(0.5),
+                            position_type: PositionType::Absolute,
+                            bottom: Val::Vh(0.25),
+                            left: Val::Vh(0.25),
+                            ..default()
+                        },
+                        BackgroundColor(Color::WHITE),
+                    ));
+                });
+        });
 }
 
 fn spawn_player(
@@ -540,7 +608,6 @@ fn drone_controller(
 
 
 
-        println!("{}", transform.translation);
 
 
         //println!("{}, {}, {}, {}",throtle, movedir, speed, airspeed)
@@ -802,7 +869,8 @@ fn mesh_chunks_async(
             let start_time = Instant::now(); // Record the start time
             let mesh = chunk_clone.cull_mesher();
             let duration = start_time.elapsed(); // Measure elapsed time
-            //println!("Meshing completed in: {:?}", duration);
+            let collider = chunk_clone.construct_collider();
+            println!("Meshing completed in: {:?}", duration);
             mesh
         });
         par_commands.command_scope(|mut commands|{
@@ -822,6 +890,7 @@ fn poll_chunk_meshing(
             commands.entity(entity).remove::<ProcessingMeshing>();
             commands.entity(entity).remove::<ProcessingLock>();
             let mesh_handle = meshes.add(mesh);
+
             commands.entity(entity).insert(Mesh3d(mesh_handle));
             //println!("meshed")
         }
